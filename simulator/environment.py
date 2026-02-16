@@ -44,6 +44,8 @@ class Environment:
         self.stations: Dict[int, Station] = {s.id: s for s in stations}
         self.w = weights
         self.t = 0
+        self.trace = []  # list of snapshots per minute
+
 
     def active_orders(self) -> List[Order]:
         #return [o for o in self.orders.values() if (not o.delivered) and (o.release_time <= self.t)]
@@ -61,13 +63,43 @@ class Environment:
         # 2) stations queue → ports
         for s in self.stations.values():
             self._process_station(s)
-
+        '''
         # 3) decision for idle bikes
         for b in self.bikes.values():
             if b.status == "idle":
                 decide_fn(self, b)
+        '''
+        # 3) decision
+        try:
+            # global policy: decide_fn(env)
+            decide_fn(self)
+        except TypeError:
+            # per-bike policy: decide_fn(env, bike)
+            for b in self.bikes.values():
+                if b.status == "idle":
+                    decide_fn(self, b)
+
 
         self.t += DT_MIN
+
+        # record snapshot for visualization
+        self.trace.append({
+            "t": self.t,
+            "bikes": [
+                (b.id, b.x, b.y, b.soc, b.status, b.target_order_id, b.target_station_id)
+                for b in self.bikes.values()
+            ],
+            "orders": [
+                (o.id, o.x, o.y, o.delivered, o.assigned_to, o.deadline)
+                for o in self.orders.values()
+            ],
+            "stations": [
+                (s.id, s.x, s.y, len(s.queue), len(s.charging_bikes), s.ports)
+                for s in self.stations.values()
+            ]
+        })
+
+
         return StepInfo(time_min=self.t, delivered_now=delivered_now)
 
     def run(self, duration_min: int, decide_fn) -> None:
@@ -157,7 +189,7 @@ class Environment:
         b.soc = target_soc
         b.target_station_id = s.id
     '''
-
+    '''
     def _start_charging(self, b: Bike, s: Station) -> None:
         # Clamp target between current SOC and 100%
         target_soc = max(b.soc, min(1.0, b.charge_target_soc if b.charge_target_soc > 0 else CHARGE_TARGET_SOC))
@@ -168,6 +200,21 @@ class Environment:
         b.remaining_charge_min = max(1, int(math.ceil(minutes)))
         b.charge_target_soc = target_soc
         b.target_station_id = s.id
+    '''
+
+    def _start_charging(self, b: Bike, s: Station) -> None:
+        # If policy didn't set a target, use default
+        target = b.charge_target_soc if b.charge_target_soc > 0 else CHARGE_TARGET_SOC
+        target_soc = max(b.soc, min(1.0, target))
+
+        needed_wh = (target_soc - b.soc) * b.battery_wh
+        minutes = (needed_wh / max(1e-9, s.charge_rate_w)) * 60.0
+
+        b.remaining_charge_min = max(1, int(math.ceil(minutes)))
+        b.charge_target_soc = target_soc
+        b.target_station_id = s.id
+       
+    
 
 
     def start_travel_to_order(self, b: Bike, o: Order) -> None:
@@ -235,3 +282,30 @@ class Environment:
                     o.release_time, o.deadline, o.completion_time,
                     is_late, o.x, o.y
                 ])
+
+
+    def best_station_for_bike(self, b: Bike, alpha: float = 3.0) -> Station:
+        """
+        Choose station that minimizes: travel_time + alpha * expected_queue_wait.
+        alpha controls how strongly you avoid queues.
+        """
+        best_s = None
+        best_score = float("inf")
+
+        for s in self.stations.values():
+            # travel time to station
+            d = dist_km((b.x, b.y), (s.x, s.y))
+            t_travel = travel_time_min(d, b.speed_kmph)
+
+            # rough queue wait estimate
+            ports = max(1, s.ports)
+            bikes_ahead = max(0, len(s.queue) - ports)
+            expected_wait = int((bikes_ahead / ports) * 10)  # 10-min chunks (simple model)
+
+            score = t_travel + alpha * expected_wait
+            if score < best_score:
+                best_score = score
+                best_s = s
+
+        # best_s will never be None if you have at least 1 station
+        return best_s

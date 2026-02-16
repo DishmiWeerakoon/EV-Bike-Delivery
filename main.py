@@ -12,7 +12,10 @@ SUMMARY_CSV = os.path.join("results", "tables", "summary.csv")
 def main():
     # Run each scenario once for baseline + heuristic.
     # Later you can loop 10 times with different seeds for stronger statistics.
+    if os.path.exists(RESULTS_CSV):
+            os.remove(RESULTS_CSV)
     for sc in SCENARIOS.keys():
+        
         m1 = run_baseline(sc)
         save_baseline(m1, RESULTS_CSV)
 
